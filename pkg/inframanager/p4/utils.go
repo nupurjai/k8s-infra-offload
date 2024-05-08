@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -230,37 +231,103 @@ func updateTables(tableName string, tableData map[string][]Table, svcmap map[str
 	}
 }
 
+func getMatchStr(v reflect.Value) string {
+	t := v.Type()
+
+	switch t.Name() {
+	case "ExactMatch":
+		return "Exact"
+	case "LpmMatch":
+		return "LPM"
+	case "RangeMatch":
+		return "Range"
+	case "TernaryMatch":
+		return "Ternary"
+	default:
+		return "Exact"
+	}
+}
+
+func makeKeyData(keyname string, v reflect.Value, keydata map[string]client.MatchInterface) {
+
+	t := v.Type()
+
+	var exact client.ExactMatch
+	var lpm client.LpmMatch
+	var rng client.RangeMatch
+	var ternary client.TernaryMatch
+
+	switch t.Name() {
+	case "ExactMatch":
+		if exact, ok := v.Interface().(client.ExactMatch); ok {
+			log.Debugf("ExactMatch type key-data found %v:\n", exact)
+		}
+		keydata[keyname] = &exact
+	case "LpmMatch":
+		if lpm, ok := v.Interface().(client.LpmMatch); ok {
+			log.Debugf("LpmMatch type key-data found %v:\n", lpm)
+		}
+		keydata[keyname] = &lpm
+
+	case "RangeMatch":
+		if rng, ok := v.Interface().(client.RangeMatch); ok {
+			log.Debugf("RangeMatch type key-data found %v: \n", rng)
+		}
+		keydata[keyname] = &rng
+
+	case "TernaryMatch":
+		if ternary, ok := v.Interface().(client.TernaryMatch); ok {
+			log.Debugf("TernaryMatch type key-data found %v:", ternary)
+		}
+		keydata[keyname] = &ternary
+	default:
+		fmt.Println("Undefined datatype found")
+	}
+}
+
 // This function utilizes the data from the Table struct
 // To prepare UpdateTable struct and then adds each instances to map.
 // TODO - Add all KeyMatch interfaces
 func PrepareTable(tblaction map[string][]UpdateTable, tbl *Table) {
 	tblmap := newUpdateTable()
+	var kd KeyData
 
 	entrycount := reflect.ValueOf(tbl.EntryCount)
 	for i := 0; i < int(entrycount.Int()); i++ {
 		keydata := make(map[string]client.MatchInterface)
 		keycount := reflect.ValueOf(tbl.KeyCount)
+
 		//For keys - mfs
 		for j := 0; j < int(keycount.Int()); j++ {
-			var value []byte
-			a := tbl.Key[j]
+			log.Debugf("The entry iter is %d and loop iter is %d\n", i, j)
+
 			in := reflect.ValueOf(tbl.Key[j])
-			switch a.(type) {
-			case [][]byte:
-				value = in.Index(i).Bytes()
-			case []byte:
-				value = in.Bytes()
-			default:
-				log.Infof("Invalid datatype received")
+			if in.Kind() == reflect.Slice {
+				log.Debugf("Slice of structures detected")
+				val := in.Index(i)
+
+				if tbl.KeyMatchType[j] == getMatchStr(val) {
+					makeKeyData(tbl.KeyName[j], val, keydata)
+					log.Debugf("Match happened inside slice for key field %d, value %v",
+						j, kd)
+				} else {
+					log.Debugf("MisMatch in expected key type and key data")
+				}
+			} else if in.Kind() == reflect.Struct {
+				//fmt.Println("Single structure detected")
+				if tbl.KeyMatchType[j] == getMatchStr(in) {
+					makeKeyData(tbl.KeyName[j], in, keydata)
+					log.Debugf("Match happened for key field %d, value %v", j, kd)
+				} else {
+					log.Debugf("MisMatch in expected key type and key data")
+				}
 			}
-			if tbl.KeyMatchType[j] == "Exact" {
-				keydata[tbl.KeyName[j]] = &client.ExactMatch{
-					Value: value}
-			} //TODO: add conditions for LPM, Ternary as well, will be handled during policy implementation
+
 		}
 		kd := KeyData{
 			key: keydata,
 		}
+
 		tblmap.mfs = append(tblmap.mfs, kd)
 
 		//For Action param
@@ -277,7 +344,7 @@ func PrepareTable(tblaction map[string][]UpdateTable, tbl *Table) {
 				case []byte:
 					value = in.Bytes()
 				default:
-					log.Infof("Unknown datatype recieved")
+					log.Debugf("Not a supported datatype for action")
 				}
 				action = append(action, value)
 			}
